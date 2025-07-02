@@ -19,6 +19,10 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 #include "SDL.h"
 #include "SDL_opengl.h"
@@ -77,6 +81,8 @@ static SDL_Rect blit_rect = {
     SCREENHEIGHT
 };
 
+static uint32_t pixel_format;
+
 // palette
 
 static SDL_Color palette[256];
@@ -129,9 +135,6 @@ int fullscreen = true;
 int aspect_ratio_correct = true;
 static int actualheight;
 
-// Smooth pixel scaling
-int smooth_pixel_scaling = true;
-
 // Force integer scales for resolution-independent rendering
 
 int integer_scaling = false;
@@ -169,7 +172,7 @@ boolean screensaver_mode = false;
 
 boolean screenvisible = true;
 
-// If true, we display dots at the bottom of the screen to 
+// If true, we display dots at the bottom of the screen to
 // indicate FPS.
 
 static boolean display_fps_dots;
@@ -179,7 +182,7 @@ static boolean display_fps_dots;
 
 static boolean noblit;
 
-// Callback function to invoke to determine whether to grab the 
+// Callback function to invoke to determine whether to grab the
 // mouse pointer.
 
 static grabmouse_callback_t grabmouse_callback = NULL;
@@ -206,10 +209,15 @@ static const unsigned int *icon_data;
 static int icon_w;
 static int icon_h;
 
+// Video recording state
+static boolean rendering_video = false;
+static FILE* ffmpeg_pipe = NULL;
+static pid_t ffmpeg_pid = -1;
+
 static boolean MouseShouldBeGrabbed()
 {
     // never grab the mouse when in screensaver mode
-   
+
     if (screensaver_mode)
         return false;
 
@@ -218,7 +226,7 @@ static boolean MouseShouldBeGrabbed()
     if (!window_focused)
         return false;
 
-    // always grab the mouse when full screen (dont want to 
+    // always grab the mouse when full screen (dont want to
     // see the mouse pointer)
 
     if (fullscreen)
@@ -276,12 +284,6 @@ void I_ShutdownGraphics(void)
     {
         SetShowCursor(true);
 
-        SDL_FreeSurface(argbbuffer);
-        SDL_FreeSurface(screenbuffer);
-        SDL_DestroyTexture(texture_upscaled);
-        SDL_DestroyTexture(texture);
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(screen);
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
 
         initialized = false;
@@ -388,7 +390,7 @@ static boolean ToggleFullScreenKeyShortcut(SDL_Keysym *sym)
 #if defined(__MACOSX__)
     flags |= (KMOD_LGUI | KMOD_RGUI);
 #endif
-    return (sym->scancode == SDL_SCANCODE_RETURN || 
+    return (sym->scancode == SDL_SCANCODE_RETURN ||
             sym->scancode == SDL_SCANCODE_KP_ENTER) && (sym->mod & flags) != 0;
 }
 
@@ -684,7 +686,7 @@ static void CreateUpscaledTexture(boolean force)
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
 
     new_texture = SDL_CreateTexture(renderer,
-                                SDL_PIXELFORMAT_ARGB8888,
+                                pixel_format,
                                 SDL_TEXTUREACCESS_TARGET,
                                 w_upscale*SCREENWIDTH,
                                 h_upscale*SCREENHEIGHT);
@@ -696,6 +698,88 @@ static void CreateUpscaledTexture(boolean force)
     {
         SDL_DestroyTexture(old_texture);
     }
+}
+
+static void StartVideoRecording(char* filename)
+{
+    int pipefd[2];
+
+    if (rendering_video)
+    {
+        return;
+    }
+
+    if (pipe(pipefd) == -1) {
+        I_Error("Failed to create pipe for FFmpeg");
+        return;
+    }
+
+    ffmpeg_pid = fork();
+    if (ffmpeg_pid == -1) {
+        I_Error("Failed to fork FFmpeg process");
+        return;
+    }
+
+    if (ffmpeg_pid == 0) { // Child process
+        close(pipefd[1]); // Close write end
+        dup2(pipefd[0], STDIN_FILENO);
+
+        // Launch FFmpeg process
+        execlp("ffmpeg", "ffmpeg",
+               "-f", "rawvideo",
+               "-pixel_format", "rgb24",
+               "-video_size", "320x200",
+               "-framerate", "35",
+               "-i", "-",
+               "-q:v", "20",
+               "-filter_complex", "[0:v]fps=10",
+               "-y",
+               filename,
+               NULL);
+
+        exit(1);
+    }
+
+    // Parent process
+    close(pipefd[0]);
+    ffmpeg_pipe = fdopen(pipefd[1], "wb");
+    rendering_video = true;
+}
+
+static void StopVideoRecording(void)
+{
+    if (!rendering_video)
+        return;
+
+    fclose(ffmpeg_pipe);
+    ffmpeg_pipe = NULL;
+
+    // Signal FFmpeg to finish
+    kill(ffmpeg_pid, SIGTERM);
+    waitpid(ffmpeg_pid, NULL, 0);
+    ffmpeg_pid = -1;
+
+    rendering_video = false;
+}
+
+static void WriteVideoFrame(void)
+{
+    static uint8_t rgb_buffer[SCREENWIDTH * SCREENHEIGHT * 3];
+
+    if (!rendering_video || !ffmpeg_pipe)
+    {
+        return;
+    }
+
+    // Convert palette indexed buffer to RGB24
+    for (int i = 0; i < SCREENWIDTH * SCREENHEIGHT; i++) {
+        SDL_Color *col = &palette[I_VideoBuffer[i]];
+        rgb_buffer[i*3] = col->r;
+        rgb_buffer[i*3+1] = col->g;
+        rgb_buffer[i*3+2] = col->b;
+    }
+
+    fwrite(rgb_buffer, sizeof(rgb_buffer), 1, ffmpeg_pipe);
 }
 
 //
@@ -744,7 +828,7 @@ void I_FinishUpdate (void)
 
 #if 0 // SDL2-TODO
     // Don't update the screen if the window isn't visible.
-    // Not doing this breaks under Windows when we alt-tab away 
+    // Not doing this breaks under Windows when we alt-tab away
     // while fullscreen.
 
     if (!(SDL_GetAppState() & SDL_APPACTIVE))
@@ -784,36 +868,33 @@ void I_FinishUpdate (void)
     }
 
     // Blit from the paletted 8-bit screen buffer to the intermediate
-    // 32-bit RGBA buffer and update the intermediate texture with the
-    // contents of the RGBA buffer.
+    // 32-bit RGBA buffer that we can load into the texture.
 
-    SDL_LockTexture(texture, &blit_rect, &argbbuffer->pixels,
-                    &argbbuffer->pitch);
     SDL_LowerBlit(screenbuffer, &blit_rect, argbbuffer, &blit_rect);
-    SDL_UnlockTexture(texture);
+
+    // Update the intermediate texture with the contents of the RGBA buffer.
+
+    SDL_UpdateTexture(texture, NULL, argbbuffer->pixels, argbbuffer->pitch);
 
     // Make sure the pillarboxes are kept clear each frame.
 
     SDL_RenderClear(renderer);
 
-    if (smooth_pixel_scaling && !force_software_renderer)
-    {
-        // Render this intermediate texture into the upscaled texture
-        // using "nearest" integer scaling.
-        SDL_SetRenderTarget(renderer, texture_upscaled);
-        SDL_RenderCopy(renderer, texture, NULL, NULL);
+    // Render this intermediate texture into the upscaled texture
+    // using "nearest" integer scaling.
 
-        // Finally, render this upscaled texture to screen using linear scaling.
+    SDL_SetRenderTarget(renderer, texture_upscaled);
+    SDL_RenderCopy(renderer, texture, NULL, NULL);
 
-        SDL_SetRenderTarget(renderer, NULL);
-        SDL_RenderCopy(renderer, texture_upscaled, NULL, NULL);
+    // Finally, render this upscaled texture to screen using linear scaling.
+
+    SDL_SetRenderTarget(renderer, NULL);
+    SDL_RenderCopy(renderer, texture_upscaled, NULL, NULL);
+
+    // Write video frame if recording
+    if (rendering_video) {
+        WriteVideoFrame();
     }
-    else
-    {
-        SDL_SetRenderTarget(renderer, NULL);
-        SDL_RenderCopy(renderer, texture, NULL, NULL);
-    }
-
 
     // Draw!
 
@@ -845,7 +926,6 @@ void I_SetPalette (byte *doompalette)
         // Zero out the bottom two bits of each channel - the PC VGA
         // controller only supports 6 bits of accuracy.
 
-        palette[i].a = 0xFFU;
         palette[i].r = gammatable[usegamma][*doompalette++] & ~3;
         palette[i].g = gammatable[usegamma][*doompalette++] & ~3;
         palette[i].b = gammatable[usegamma][*doompalette++] & ~3;
@@ -884,7 +964,7 @@ int I_GetPaletteIndex(int r, int g, int b)
     return best;
 }
 
-// 
+//
 // Set the window title
 //
 
@@ -894,7 +974,7 @@ void I_SetWindowTitle(const char *title)
 }
 
 //
-// Call the SDL function to set the window title, based on 
+// Call the SDL function to set the window title, based on
 // the title set with I_SetWindowTitle.
 //
 
@@ -964,7 +1044,7 @@ void I_GraphicsCheckCommandLine(void)
     noblit = M_CheckParm ("-noblit");
 
     //!
-    // @category video 
+    // @category video
     //
     // Don't grab the mouse when running in windowed mode.
     //
@@ -975,7 +1055,7 @@ void I_GraphicsCheckCommandLine(void)
     // nofullscreen because we love prboom
 
     //!
-    // @category video 
+    // @category video
     //
     // Run in a window.
     //
@@ -986,7 +1066,7 @@ void I_GraphicsCheckCommandLine(void)
     }
 
     //!
-    // @category video 
+    // @category video
     //
     // Run in fullscreen mode.
     //
@@ -997,7 +1077,7 @@ void I_GraphicsCheckCommandLine(void)
     }
 
     //!
-    // @category video 
+    // @category video
     //
     // Disable the mouse.
     //
@@ -1080,7 +1160,7 @@ void I_GraphicsCheckCommandLine(void)
     // Don't scale up the screen. Implies -window.
     //
 
-    if (M_CheckParm("-1")) 
+    if (M_CheckParm("-1"))
     {
         SetScaleFactor(1);
     }
@@ -1091,7 +1171,7 @@ void I_GraphicsCheckCommandLine(void)
     // Double up the screen to 2x its normal size. Implies -window.
     //
 
-    if (M_CheckParm("-2")) 
+    if (M_CheckParm("-2"))
     {
         SetScaleFactor(2);
     }
@@ -1102,7 +1182,7 @@ void I_GraphicsCheckCommandLine(void)
     // Double up the screen to 3x its normal size. Implies -window.
     //
 
-    if (M_CheckParm("-3")) 
+    if (M_CheckParm("-3"))
     {
         SetScaleFactor(3);
     }
@@ -1203,6 +1283,8 @@ static void SetVideoMode(void)
 {
     int w, h;
     int x, y;
+    unsigned int rmask, gmask, bmask, amask;
+    int bpp;
     int window_flags = 0, renderer_flags = 0;
     SDL_DisplayMode mode;
 
@@ -1260,6 +1342,8 @@ static void SetVideoMode(void)
             SDL_GetError());
         }
 
+        pixel_format = SDL_GetWindowPixelFormat(screen);
+
         SDL_SetWindowMinimumSize(screen, SCREENWIDTH, actualheight);
 
         I_InitWindowTitle();
@@ -1269,7 +1353,7 @@ static void SetVideoMode(void)
     // The SDL_RENDERER_TARGETTEXTURE flag is required to render the
     // intermediate texture into the upscaled texture.
     renderer_flags = SDL_RENDERER_TARGETTEXTURE;
-	
+
     if (SDL_GetCurrentDisplayMode(video_display, &mode) != 0)
     {
         I_Error("Could not get display mode for video display #%d: %s",
@@ -1370,10 +1454,12 @@ static void SetVideoMode(void)
 
     if (argbbuffer == NULL)
     {
-	    // pixels and pitch will be filled with the texture's values
-	    // in I_FinishUpdate()
-	    argbbuffer = SDL_CreateRGBSurfaceWithFormatFrom(
-                     NULL, w, h, 0, 0, SDL_PIXELFORMAT_ARGB8888);
+        SDL_PixelFormatEnumToMasks(pixel_format, &bpp,
+                                   &rmask, &gmask, &bmask, &amask);
+        argbbuffer = SDL_CreateRGBSurface(0,
+                                          SCREENWIDTH, SCREENHEIGHT, bpp,
+                                          rmask, gmask, bmask, amask);
+        SDL_FillRect(argbbuffer, NULL, 0);
     }
 
     if (texture != NULL)
@@ -1392,7 +1478,7 @@ static void SetVideoMode(void)
     // is going to change frequently.
 
     texture = SDL_CreateTexture(renderer,
-                                SDL_PIXELFORMAT_ARGB8888,
+                                pixel_format,
                                 SDL_TEXTUREACCESS_STREAMING,
                                 SCREENWIDTH, SCREENHEIGHT);
 
@@ -1418,8 +1504,9 @@ void I_InitGraphics(void)
     SDL_Event dummy;
     byte *doompal;
     char *env;
+    int p;
 
-    // Pass through the XSCREENSAVER_WINDOW environment variable to 
+    // Pass through the XSCREENSAVER_WINDOW environment variable to
     // SDL_WINDOWID, to embed the SDL window into the Xscreensaver
     // window.
 
@@ -1438,7 +1525,7 @@ void I_InitGraphics(void)
 
     SetSDLVideoDriver();
 
-    if (SDL_Init(SDL_INIT_VIDEO) < 0) 
+    if (SDL_Init(SDL_INIT_VIDEO) < 0)
     {
         I_Error("Failed to initialize video: %s", SDL_GetError());
     }
@@ -1501,7 +1588,7 @@ void I_InitGraphics(void)
     memset(I_VideoBuffer, 0, SCREENWIDTH * SCREENHEIGHT * sizeof(*I_VideoBuffer));
 
     // clear out any events waiting at the start and center the mouse
-  
+
     while (SDL_PollEvent(&dummy));
 
     initialized = true;
@@ -1509,6 +1596,13 @@ void I_InitGraphics(void)
     // Call I_ShutdownGraphics on quit
 
     I_AtExit(I_ShutdownGraphics, true);
+
+    p = M_CheckParmWithArgs("-render", 1);
+    if (p)
+    {
+        StartVideoRecording(myargv[p+1]);
+        I_AtExit(StopVideoRecording, true);
+    }
 }
 
 // Bind all variables controlling video options into the configuration
@@ -1520,7 +1614,6 @@ void I_BindVideoVariables(void)
     M_BindIntVariable("video_display",             &video_display);
     M_BindIntVariable("aspect_ratio_correct",      &aspect_ratio_correct);
     M_BindIntVariable("integer_scaling",           &integer_scaling);
-    M_BindIntVariable("smooth_pixel_scaling",      &smooth_pixel_scaling);
     M_BindIntVariable("vga_porch_flash",           &vga_porch_flash);
     M_BindIntVariable("startup_delay",             &startup_delay);
     M_BindIntVariable("fullscreen_width",          &fullscreen_width);
