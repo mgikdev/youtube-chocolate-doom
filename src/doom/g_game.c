@@ -1387,8 +1387,14 @@ boolean		secretexit;
 
 void G_ExitLevel (void)
 {
+    // secretexit = false;
+    // gameaction = ga_completed;
+
+    // doomcord: skip intermission, go directly to next map
     secretexit = false;
-    gameaction = ga_completed;
+    wminfo.next = gamemap;
+    gamestate = GS_LEVEL;
+    G_WorldDone();
 }
 
 // Here's for the german edition.
