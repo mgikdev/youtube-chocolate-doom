@@ -85,7 +85,7 @@ wipe_doColorXForm
     changed = false;
     w = wipe_scr;
     e = wipe_scr_end;
-    
+
     while (w!=wipe_scr+width*height)
     {
 	if (*w != *e)
@@ -136,15 +136,15 @@ wipe_initMelt
   int	ticks )
 {
     int i, r;
-    
+
     // copy start screen to main screen
     memcpy(wipe_scr, wipe_scr_start, width*height*sizeof(*wipe_scr));
-    
+
     // makes this wipe faster (in theory)
     // to have stuff in column-major format
     wipe_shittyColMajorXform((dpixel_t*)wipe_scr_start, width/2, height);
     wipe_shittyColMajorXform((dpixel_t*)wipe_scr_end, width/2, height);
-    
+
     // setup initial column positions
     // (y<0 => not ready to scroll yet)
     y = (int *) Z_Malloc(width*sizeof(int), PU_STATIC, 0);
@@ -170,7 +170,7 @@ wipe_doMelt
     int		j;
     int		dy;
     int		idx;
-    
+
     dpixel_t*	s;
     dpixel_t*	d;
     boolean	done = true;
@@ -221,6 +221,9 @@ wipe_exitMelt
   int	height,
   int	ticks )
 {
+    // doomcord: disable screen wipe for faster startup
+    return 0;
+
     Z_Free(y);
     Z_Free(wipe_scr_start);
     Z_Free(wipe_scr_end);
@@ -234,6 +237,9 @@ wipe_StartScreen
   int	width,
   int	height )
 {
+    // doomcord: disable screen wipe for faster startup
+    return 0;
+
     wipe_scr_start = Z_Malloc(SCREENWIDTH * SCREENHEIGHT * sizeof(*wipe_scr_start), PU_STATIC, NULL);
     I_ReadScreen(wipe_scr_start);
     return 0;
@@ -246,6 +252,9 @@ wipe_EndScreen
   int	width,
   int	height )
 {
+    // doomcord: disable screen wipe for faster startup
+    return 0;
+
     wipe_scr_end = Z_Malloc(SCREENWIDTH * SCREENHEIGHT * sizeof(*wipe_scr_end), PU_STATIC, NULL);
     I_ReadScreen(wipe_scr_end);
     V_DrawBlock(x, y, width, height, wipe_scr_start); // restore start scr.
@@ -267,6 +276,9 @@ wipe_ScreenWipe
 	wipe_initColorXForm, wipe_doColorXForm, wipe_exitColorXForm,
 	wipe_initMelt, wipe_doMelt, wipe_exitMelt
     };
+
+    // doomcord: disable screen wipe for faster startup
+    return 1;
 
     // initial stuff
     if (!go)
