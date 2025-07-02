@@ -2349,6 +2349,10 @@ void G_TimeDemo (char* name)
 
     defdemoname = name;
     gameaction = ga_playdemo;
+
+    // doomcord: save game to slot 0 after finishing demo
+    savegameslot = 0;
+    I_AtExit(G_DoSaveGame, true);
 }
 
 
