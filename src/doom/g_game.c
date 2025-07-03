@@ -1395,6 +1395,8 @@ void G_ExitLevel (void)
     wminfo.next = gamemap;
     gamestate = GS_LEVEL;
     G_WorldDone();
+
+    printf("DOOMCORD G_ExitLevel\n");
 }
 
 // Here's for the german edition.
