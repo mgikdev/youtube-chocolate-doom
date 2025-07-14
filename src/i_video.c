@@ -728,7 +728,7 @@ static void StartVideoRecording(char* filename)
         execlp("ffmpeg", "ffmpeg",
                "-f", "rawvideo",
                "-pixel_format", "rgb24",
-               "-video_size", "300x200",
+               "-video_size", "320x200",
                "-framerate", "35",
                "-i", "-",
                "-c:v", "libx264",
