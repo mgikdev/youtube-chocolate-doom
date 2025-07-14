@@ -726,18 +726,18 @@ static void StartVideoRecording(char* filename)
 
         // Launch FFmpeg process
         execlp("ffmpeg", "ffmpeg",
-             "-f", "rawvideo",
-             "-pixel_format", "rgb24",
-             "-video_size", "320x200",
-             "-framerate", "35",
-             "-i", "-",
-             "-c:v", "libx264",
-             "-crf", "16",
-             "-preset", "veryfast",
-             "-vf", "scale=1280:720:flags=neighbor",
-             "-y",
-             NULL 
-	);
+		"-f", "rawvideo",
+		"-pixel_format", "rgb24",
+		"-video_size", "320x200",
+		"-framerate", "35",
+		"-i", "-",
+		"-c:v", "libx264",
+		"-crf", "16",
+		"-preset", "veryfast",
+		"-vf", "scale=1280:720:flags=neighbor",
+		"-y",
+		filename,
+		NULL);
 
         exit(1);
     }
