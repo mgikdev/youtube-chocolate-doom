@@ -1,5 +1,5 @@
 # YouTube Doom
-a fork of portalrunner's chocolate-doomcord that will probably soon be modified to work better with youtube idk if this even needs any modifications yet to make this work just figured it would be good to make a fork in advance okay byeeeeee
+a fork of portalrunner's chocolate-doomcord that will probably soon be modified to work better with youtube idk if this even needs any modifications yet to make this work just figured it would be good to make a fork in advance
 
 oh yeah it's basically just the video sequence thing except via youtube, so:
 
